@@ -23,6 +23,11 @@ BLECharacteristic* pCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
+// Sync variables
+bool isSynced = false;
+uint32_t phoneSyncTime = 0;      // Phone's Date.now() timestamp in ms
+uint32_t espSyncTime = 0;        // ESP's millis() when sync received
+
 // Sensor objects
 MPU6050 mpu;
 DFRobot_QMC5883 compass(&Wire, QMC5883_ADDRESS);
@@ -53,17 +58,24 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
-// Callback class for characteristic write events
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pCharacteristic) {
-      String value = pCharacteristic->getValue();
+      uint8_t* data = pCharacteristic->getData();
+      size_t length = pCharacteristic->getValue().length();
       
-      if (value.length() > 0) {
-        Serial.print("Received value: ");
-        for (int i = 0; i < value.length(); i++) {
-          Serial.print(value[i]);
-        }
-        Serial.println();
+      if (length >= 4) {  // Expecting at least 4 bytes for timestamp
+        // Extract phone timestamp (assuming uint32_t sent as 4 bytes)
+        memcpy(&phoneSyncTime, data, 4);
+        espSyncTime = millis();
+        isSynced = true;
+        
+        Serial.println("=== SYNC RECEIVED ===");
+        Serial.printf("Phone time: %u ms\n", phoneSyncTime);
+        Serial.printf("ESP time: %u ms\n", espSyncTime);
+        Serial.println("Synced! Ready to collect data.");
+        
+        // Reset batch on sync
+        batchIndex = 0;
       }
     }
 };
@@ -176,6 +188,14 @@ void readSensors(SensorReading &reading) {
   
   // Get timestamp in milliseconds
   reading.timestamp = millis();
+
+  // Calculate synced timestamp
+  if (isSynced) {
+    uint32_t espElapsed = millis() - espSyncTime;
+    reading.timestamp = phoneSyncTime + espElapsed;
+  } else {
+    reading.timestamp = millis();  // Fallback if not synced
+  }
 }
 
 void sendBatchData() {
@@ -240,6 +260,12 @@ void sendBatchData() {
 }
 
 void loop() {
+  // Only collect data if synced
+  if (!isSynced) {
+    delay(100);
+    return;
+  }
+   
   // Read sensor data and store in batch
   readSensors(sensorBatch[batchIndex]);
   
